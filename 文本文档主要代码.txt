@@ -1,0 +1,524 @@
+#include "buzzer.h"
+#include "dht11.h"
+#include "key.h"
+#include "oled.h"
+#include "timer.h"
+#include "humiture_data.h"
+
+#include "delay.h"
+#include "sys.h"
+#include "usart.h"
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+char usart1_app_buff[256] = {0};
+
+uint8_t relay_flag = 0;
+uint8_t mode_flag = 0;
+
+void relay_init(void);                //加湿器继电器初始化
+void relay_set(uint8_t flag);         //加湿器继电器设置
+void water_stage_init(void);          //水位传感器初始化
+uint16_t water_stage_get(void);       //水位传感器值获取
+void humiture_alarm_set_dispose(void);//温湿度报警设置处理
+void main_interface(void);            //主界面
+void humidity_interface(void);        //湿度界面
+
+int main(void)
+{
+	uint32_t time_count = 0;
+	uint8_t temp = 0;
+	uint8_t humidity = 0;
+	uint16_t water_stage_value = 0;
+	char str1[8] = {0};
+	char str2[8] = {0};
+	
+	memset(&humiture_data, 0, sizeof(humitureDataTypeDef));
+
+	humiture_data.humidity_alarm_value = 80;//初始湿度报警值为80
+	
+	delay_init();	  //延时初始化,72MHz
+	
+	DHT11_Init();      //温湿度初始化(PB11)
+	relay_init();      //加湿器继电器初始化(PA8)
+	key_init();        //按键初始化(PB3,PB4,PC13)
+	water_stage_init();//水位传感器初始化(PA2)
+	OLED_Init();       //OLED初始化(PA4,PA5)
+	buzzer_init();     //蜂鸣器初始化(PB12)
+	uart1_init(9600);//串口1初始化(PA9,PA10)
+	
+	delay_ms(1500);
+	
+	OLED_Clear();		//OLED清屏
+	
+	delay_ms(150);
+	
+	main_interface();	//主界面
+	
+	humiture_data.time3_count = 0;
+	humiture_data.time3_count1 = 0;
+	ON_TIMx(TIM3);
+	
+	while(1)
+	{
+		/* 温湿度报警设置处理 */
+		humiture_alarm_set_dispose();
+		
+		/* 显示标志为0可以显示温湿度和监控报警 */
+		if (humiture_data.show_flag == 0)
+		{
+			/* 读取水位ADC值 */
+			water_stage_value = water_stage_get();
+			
+			if (DHT11_Read_Data(&temp, &humidity) == 0)//读取温湿度值
+			{
+				sprintf(str2, "%02d", humidity);//当前湿度转字符串
+				OLED_Display_6x8_8x16(0, 40, 1, (const u8 *)str2);
+				
+				sprintf(str1, "%02d", temp);//当前温度转字符串
+				OLED_Display_6x8_8x16(0, 104, 1, (const u8 *)str1);
+			}
+			
+			/* 报警标志为0可以监控报警 */
+			if (humiture_data.alarm_flag == 0)
+			{
+				if (water_stage_value < 3500)
+				{
+					humiture_data.time3_count = 0;
+					
+					OLED_Display_16x16(6, 80, 16, Chinese);//显示"充"
+					OLED_Display_16x16(6, 96, 17, Chinese);//显示"足"
+					
+					if (mode_flag == 0)
+					{
+						/* 当前湿度大于报警湿度值 */
+						if (humidity < humiture_data.humidity_alarm_value)
+						{
+							OLED_Display_6x8_8x16(2, 96, 1, (const u8 *)"ON ");
+							
+							relay_flag = 1;
+							relay_set(1);
+						}
+						else
+						{
+							OLED_Display_6x8_8x16(2, 96, 1, (const u8 *)"OFF");
+							
+							relay_flag = 0;
+							relay_set(0);
+						}
+					}
+				}
+				else
+				{
+					OLED_Display_6x8_8x16(2, 96, 1, (const u8 *)"OFF");
+					
+					OLED_Display_16x16(6, 80, 14, Chinese);//显示"缺"
+					OLED_Display_16x16(6, 96, 15, Chinese);//显示"水"
+					
+					relay_flag = 0;
+					relay_set(0);
+					
+					humiture_data.alarm_flag = 1;
+
+				}
+			}
+			
+
+		time_count++;
+        if (time_count >= 155)
+        {
+			__set_PRIMASK(1);
+			
+
+            sprintf(usart1_app_buff, " \r\n", 0);
+            USART1_TX((uint8_t *)usart1_app_buff);
+			delay_ms(20);
+			
+            sprintf(usart1_app_buff, "环境湿度：%d\r\n", humidity);
+            USART1_TX((uint8_t *)usart1_app_buff);
+			delay_ms(20);
+
+            sprintf(usart1_app_buff, "环境温度：%d\r\n", temp);
+            USART1_TX((uint8_t *)usart1_app_buff);
+			delay_ms(20);
+
+            sprintf(usart1_app_buff, "湿度阈值：%d\r\n", humiture_data.humidity_alarm_value);
+            USART1_TX((uint8_t *)usart1_app_buff);
+			delay_ms(20);
+
+            sprintf(usart1_app_buff, "当前水量：%s\r\n\r\n", water_stage_value < 3500 ? "充足" : "缺水");
+            USART1_TX((uint8_t *)usart1_app_buff);
+			delay_ms(20);
+
+            sprintf(usart1_app_buff, "加湿器模式：%s\r\n", mode_flag == 0 ? "自动" : "手动");
+            USART1_TX((uint8_t *)usart1_app_buff);
+			delay_ms(20);
+
+            sprintf(usart1_app_buff, "加湿器状态：%s\r\n", relay_flag == 0 ? "OFF" : "ON");
+            USART1_TX((uint8_t *)usart1_app_buff);
+			delay_ms(20);
+			
+			__set_PRIMASK(0);
+			
+		    time_count = 0;
+        }	
+			
+		}
+	}
+}
+
+//加湿器继电器初始化
+void relay_init(void)
+{
+ 	GPIO_InitTypeDef GPIO_InitStructure;
+ 	
+ 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+	
+ 	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8;
+ 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+ 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+ 	GPIO_Init(GPIOA, &GPIO_InitStructure);
+	
+ 	GPIO_ResetBits(GPIOA, GPIO_Pin_8);
+}
+
+//加湿器继电器设置
+void relay_set(uint8_t flag)
+{
+	if (flag)
+		GPIO_SetBits(GPIOA, GPIO_Pin_8);
+//		GPIO_ResetBits(GPIOA, GPIO_Pin_8);
+	else
+//		GPIO_SetBits(GPIOA, GPIO_Pin_8);
+		GPIO_ResetBits(GPIOA, GPIO_Pin_8);
+}
+
+//水位传感器初始化
+void water_stage_init(void)
+{
+	ADC_InitTypeDef ADC_InitStructure; 
+	GPIO_InitTypeDef GPIO_InitStructure;
+
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA |RCC_APB2Periph_ADC1	, ENABLE );	  //使能ADC1通道时钟
+ 
+
+	RCC_ADCCLKConfig(RCC_PCLK2_Div6);   //设置ADC分频因子6 72M/6=12,ADC最大时间不能超过14M
+
+	//PA1 作为模拟通道输入引脚                         
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;			
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;		//模拟输入引脚
+	GPIO_Init(GPIOA, &GPIO_InitStructure);				//PA2
+
+	ADC_DeInit(ADC1);  //复位ADC1 
+
+	ADC_InitStructure.ADC_Mode = ADC_Mode_Independent;	//ADC工作模式:ADC1和ADC2工作在独立模式
+	ADC_InitStructure.ADC_ScanConvMode = DISABLE;	//模数转换工作在单通道模式
+	ADC_InitStructure.ADC_ContinuousConvMode = DISABLE;	//模数转换工作在单次转换模式
+	ADC_InitStructure.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;	//转换由软件而不是外部触发启动
+	ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;	//ADC数据右对齐
+	ADC_InitStructure.ADC_NbrOfChannel = 1;	//顺序进行规则转换的ADC通道的数目
+	ADC_Init(ADC1, &ADC_InitStructure);	//根据ADC_InitStruct中指定的参数初始化外设ADCx的寄存器   
+
+  
+	ADC_Cmd(ADC1, ENABLE);	//使能指定的ADC1
+	
+	ADC_ResetCalibration(ADC1);	//使能复位校准  
+	 
+	while(ADC_GetResetCalibrationStatus(ADC1));	//等待复位校准结束
+	
+	ADC_StartCalibration(ADC1);	 //开启AD校准
+ 
+	while(ADC_GetCalibrationStatus(ADC1));	 //等待校准结束
+}
+
+//获得ADC值
+//ch:通道值 0~3
+uint16_t Get_Adc(uint8_t ch)   
+{
+  	//设置指定ADC的规则组通道，一个序列，采样时间
+	ADC_RegularChannelConfig(ADC1, ch, 1, ADC_SampleTime_239Cycles5 );	//ADC1,ADC通道,采样时间为239.5周期	  			    
+  
+	ADC_SoftwareStartConvCmd(ADC1, ENABLE);		//使能指定的ADC1的软件转换启动功能	
+	 
+	while(!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC ));//等待转换结束
+
+	return ADC_GetConversionValue(ADC1);	//返回最近一次ADC1规则组的转换结果
+}
+
+uint16_t Get_Adc_Average(uint8_t ch, uint8_t times)
+{
+	uint32_t temp_val=0;
+	uint8_t t;
+	for(t=0;t<times;t++)
+	{
+		temp_val+=Get_Adc(ch);
+		delay_ms(5);
+	}
+	return temp_val/times;
+}
+
+//水位传感器值获取
+uint16_t water_stage_get(void)
+{
+	return Get_Adc_Average(2, 2);
+}
+
+//温湿度报警设置处理
+void humiture_alarm_set_dispose(void)
+{
+	u8 key = KEY_NULL;
+	char str1[8] = {0};
+	char humiture_str[16] = {0};
+	
+	if (humiture_data.page == 0)
+	{
+		key = key_scan();//按键扫描
+		switch(key)
+		{
+			case KEY1_LONG_PRESS:
+				
+				humiture_data.page++;
+				
+				humiture_data.set_flag = 1;
+				
+				humiture_data.alarm_flag = 0;
+				
+				humidity_interface();
+				
+				break;
+			
+			case KEY3_SHORT_PRESS:
+				
+				if (mode_flag == 1)
+				{
+					relay_flag = !relay_flag;
+					relay_set(relay_flag);
+					if (relay_flag == 0)
+					{
+						OLED_Display_6x8_8x16(2, 96, 1, (const u8 *)"OFF");
+					}
+					else
+					{
+						OLED_Display_6x8_8x16(2, 96, 1, (const u8 *)"ON ");
+					}
+				}
+				
+				break;
+			
+			case KEY3_LONG_PRESS:
+				
+				mode_flag = !mode_flag;
+				if (mode_flag == 0)
+				{
+					OLED_Display_16x16(2, 40, 5, Chinese); //显示"自"
+					OLED_Display_16x16(2, 56, 7, Chinese); //显示"动"
+				}
+				else
+				{
+					OLED_Display_16x16(2, 40, 6, Chinese); //显示"手"
+					OLED_Display_16x16(2, 56, 7, Chinese); //显示"动"
+				}
+				
+				break;
+			
+			default:break;
+		}
+		
+		/* 蓝牙APP设置 */
+		if (USART1_RX_BUF[0] != 0x00)
+		{
+			if (USART1_RX_BUF[0] == 'J')//湿度阈值加
+			{
+				humiture_data.humidity_alarm_value++;
+				if(humiture_data.humidity_alarm_value > 99)
+					humiture_data.humidity_alarm_value = 99;
+				
+				sprintf(str1, "%02d", humiture_data.humidity_alarm_value);
+				OLED_Display_6x8_8x16(4, 80, 1, (const uint8_t *)str1);
+			}
+			else if (USART1_RX_BUF[0] == 'K')//湿度阈值减
+			{
+				humiture_data.humidity_alarm_value--;
+				if(humiture_data.humidity_alarm_value < 1)
+					humiture_data.humidity_alarm_value = 1;
+				
+				sprintf(str1, "%02d", humiture_data.humidity_alarm_value);
+				OLED_Display_6x8_8x16(4, 80, 1, (const uint8_t *)str1);
+			}
+			else if (USART1_RX_BUF[0] == 'M')//设置切换
+			{
+				mode_flag = !mode_flag;
+				if (mode_flag == 0)
+				{
+					OLED_Display_16x16(2, 40, 5, Chinese); //显示"自"
+					OLED_Display_16x16(2, 56, 7, Chinese); //显示"动"
+				}
+				else
+				{
+					OLED_Display_16x16(2, 40, 6, Chinese); //显示"手"
+					OLED_Display_16x16(2, 56, 7, Chinese); //显示"动"
+				}
+			}
+			else if (USART1_RX_BUF[0] == 'S')//手动模式下开启加湿
+			{
+				if (mode_flag == 1)
+				{
+					relay_flag = !relay_flag;
+					relay_set(relay_flag);
+					if (relay_flag == 0)
+					{
+						OLED_Display_6x8_8x16(2, 96, 1, (const u8 *)"OFF");
+					}
+					else
+					{
+						OLED_Display_6x8_8x16(2, 96, 1, (const u8 *)"ON ");
+					}
+				}
+			}
+			
+			USART1_RX_BUF[0] = 0x00;
+		}
+	}
+	else if(humiture_data.page == 1)
+	{
+		key = key_scan();//按键扫描
+		switch(key)
+		{
+			case KEY1_SHORT_PRESS:
+				
+				if(humiture_data.set_flag == 1)
+				{
+					humiture_data.humidity_alarm_value--;
+					if(humiture_data.humidity_alarm_value < 1)
+						humiture_data.humidity_alarm_value = 1;
+					
+					sprintf(humiture_str, "%02d", humiture_data.humidity_alarm_value);
+					OLED_Display_6x8_8x16(2, 80, 1, (const u8 *)humiture_str);
+				}
+				
+				break;
+			
+			case KEY1_LONG_PRESS:
+				
+				humiture_data.page--;
+				
+				humiture_data.show_flag = 0;
+				
+				humiture_data.alarm_flag = 0;
+				
+				OLED_Clear();
+				
+				delay_ms(100);
+				
+				main_interface();
+				
+				break;
+			
+			case KEY2_SHORT_PRESS:
+				
+				if(humiture_data.set_flag == 1)
+				{
+					humiture_data.humidity_alarm_value++;
+					if(humiture_data.humidity_alarm_value > 99)
+						humiture_data.humidity_alarm_value = 99;
+					
+					sprintf(humiture_str, "%02d", humiture_data.humidity_alarm_value);
+					OLED_Display_6x8_8x16(2, 80, 1, (const u8 *)humiture_str);
+				}
+				
+				break;
+			
+			default:break;
+		}
+	}
+}
+
+//主界面
+void main_interface(void)
+{
+	char str1[8] = {0};
+	
+	OLED_Display_16x16(0, 0, 1, Chinese);  //显示"湿"
+	OLED_Display_16x16(0, 16, 2, Chinese); //显示"度"
+	OLED_Display_16x16(0, 32, 18, Chinese);//显示":"
+	
+	OLED_Display_16x16(0, 64, 0, Chinese); //显示"温"
+	OLED_Display_16x16(0, 80, 2, Chinese); //显示"度"
+	OLED_Display_16x16(0, 96, 18, Chinese);//显示":"
+	
+	
+	
+	OLED_Display_16x16(2, 0, 3, Chinese);  //显示"模"
+	OLED_Display_16x16(2, 16, 4, Chinese); //显示"式"
+	OLED_Display_16x16(2, 32, 18, Chinese);//显示":"
+	OLED_Display_16x16(2, 40, 5, Chinese); //显示"自"
+	OLED_Display_16x16(2, 56, 7, Chinese); //显示"动"
+	
+	OLED_Display_6x8_8x16(2, 80, 1, (const uint8_t *)"S");
+	OLED_Display_16x16(2, 88, 18, Chinese);//显示":"
+	OLED_Display_6x8_8x16(2, 96, 1, (const u8 *)"OFF");
+	
+	
+	OLED_Display_16x16(4, 0, 1, Chinese);  //显示"湿"
+	OLED_Display_16x16(4, 16, 2, Chinese); //显示"度"
+	OLED_Display_16x16(4, 32, 8, Chinese); //显示"阈"
+	OLED_Display_16x16(4, 48, 9, Chinese); //显示"值"
+	OLED_Display_16x16(4, 64, 18, Chinese);//显示":"
+	sprintf(str1, "%02d", humiture_data.humidity_alarm_value);
+	OLED_Display_6x8_8x16(4, 80, 1, (const uint8_t *)str1);
+	
+	
+	
+	OLED_Display_16x16(6, 0, 10, Chinese); //显示"当"
+	OLED_Display_16x16(6, 16, 11, Chinese);//显示"前"
+	OLED_Display_16x16(6, 32, 12, Chinese);//显示"水"
+	OLED_Display_16x16(6, 48, 13, Chinese);//显示"量"
+	OLED_Display_16x16(6, 64, 18, Chinese);//显示":"
+}
+
+//湿度界面
+void humidity_interface(void)
+{
+	char humidity_str[16] = {0};
+	
+	humiture_data.show_flag = 1;
+	
+	OLED_Clear();                                                   //OLED清屏
+	
+	delay_ms(50);
+	
+	OLED_Display_16x16(0, 16, 1, Chinese);                          //显示"湿"
+	OLED_Display_16x16(0, 32, 2, Chinese);                          //显示"度"
+	OLED_Display_16x16(0, 48, 8, Chinese);                          //显示"阈"
+	OLED_Display_16x16(0, 64, 9, Chinese);                          //显示"值"
+	OLED_Display_16x16(0, 80, 20, Chinese);                         //显示"设"
+	OLED_Display_16x16(0, 96, 21, Chinese);                         //显示"置"
+	
+	OLED_Display_16x16(2, 0, 6, Chinese);                           //显示"报"
+	OLED_Display_16x16(2, 16, 7, Chinese);                          //显示"警"
+	OLED_Display_16x16(2, 32, 4, Chinese);                          //显示"湿"
+	OLED_Display_16x16(2, 48, 5, Chinese);                          //显示"度"
+	OLED_Display_6x8_8x16(2, 64, 1, (const u8 *)":");               //显示":"
+	sprintf(humidity_str, "%02d", humiture_data.humidity_alarm_value);//报警湿度值转字符串
+	OLED_Display_6x8_8x16(2, 80, 1, (const u8 *)humidity_str);      //显示报警湿度值
+	
+	OLED_Display_16x16(4, 0, 22, Chinese);                          //显示"长"
+	OLED_Display_16x16(4, 16, 23, Chinese);                         //显示"按"
+	OLED_Display_6x8_8x16(4, 32, 1, (const u8 *)"K1");              //显示"K1"
+	OLED_Display_16x16(4, 48, 24, Chinese);                         //显示"键"
+	OLED_Display_16x16(4, 64, 25, Chinese);                         //显示"完"
+	OLED_Display_16x16(4, 80, 26, Chinese);                         //显示"成"
+	OLED_Display_16x16(4, 96, 20, Chinese);                         //显示"设"
+	OLED_Display_16x16(4, 112, 21, Chinese);                        //显示"置"
+	
+	OLED_Display_6x8_8x16(6, 0, 1, (const u8 *)"K1");               //显示"K1"
+	OLED_Display_16x16(6, 16, 24, Chinese);                         //显示"键"
+	OLED_Display_6x8_8x16(6, 32, 1, (const u8 *)":");               //显示":"
+	OLED_Display_6x8_8x16(6, 48, 1, (const u8 *)"-");               //显示"-"
+	OLED_Display_6x8_8x16(6, 64, 1, (const u8 *)"K2");              //显示"K2"
+	OLED_Display_16x16(6, 80, 24, Chinese);                         //显示"键"
+	OLED_Display_6x8_8x16(6, 96, 1, (const u8 *)":");               //显示":"
+	OLED_Display_6x8_8x16(6, 112, 1, (const u8 *)"+");              //显示"+"
+}
